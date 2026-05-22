@@ -22,8 +22,6 @@ func (q *QueueWorker) Run(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	for {
-		slog.Info("running!", "time", time.Now().UnixMicro())
-
 		// Sleep interruptibly: wake up either after 5s or when ctx is cancelled.
 		select {
 		case <-ctx.Done():
