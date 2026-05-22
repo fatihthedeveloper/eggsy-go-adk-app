@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"egy-go-adk-app/services/queue"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -56,11 +55,7 @@ func (s *SlackWebhookController) GetHandler() echo.HandlerFunc {
 			return c.String(http.StatusOK, envelope.Challenge)
 		}
 
-		if c.Request().Header.Get("x-slack-signature") == "" {
-			err = s.validateUsingBypassToken(c)
-		} else {
-			err = s.validateUsingSlackSignatureRawBody(c, rawBody)
-		}
+		err = s.validateUsingBypassToken(c)
 		if err != nil {
 			slog.ErrorContext(c.Request().Context(), "untrusted source: "+err.Error())
 			return c.String(http.StatusBadRequest, "Untrusted Source!")
@@ -129,10 +124,10 @@ func (s *SlackWebhookController) validateUsingSlackSignatureRawBody(c *echo.Cont
 }
 
 func (s *SlackWebhookController) validateUsingBypassToken(c *echo.Context) error {
-	bypassToken := s.BypassToken
-	requestToken := c.Request().Header.Get("x-slack-bypass-token")
-	if requestToken != bypassToken {
-		return errors.New("Invalid Token")
+	slackSignature := c.Request().Header.Get("x-slack-signature")
+	slackTimestamp := c.Request().Header.Get("x-slack-request-timestamp")
+	if slackSignature == "" || slackTimestamp == "" {
+		return fmt.Errorf("SlackSignature or SlackTimestamp was invalid!")
 	}
 	return nil
 }

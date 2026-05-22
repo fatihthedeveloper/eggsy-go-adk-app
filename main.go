@@ -18,8 +18,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cloudflare/cloudflare-go/v6"
-	"github.com/cloudflare/cloudflare-go/v6/option"
 	adkchatsdk "github.com/fatihthedeveloper/adk-chat-sdk"
 	commoncloudflared1sdk "github.com/fatihthedeveloper/cloudflare-d1-sdk"
 	eggsyaccountsdk "github.com/fatihthedeveloper/eggsy-account-sdk"
@@ -60,16 +58,9 @@ func app() {
 
 	cloudflareAccountId := mustEnv("CLOUDFLARE_ACCOUNT_ID")
 
-	client := cloudflare.NewClient(
-		option.WithAPIToken(mustEnv("CLOUDFLARE_API_TOKEN")),
-	)
+	var queueMgr queue.QueueManager
 
-	queueMgr := &queue.CloudflareQueueManager{
-		CloudflareApp: queue.CloudflareApplication{
-			Client:    client,
-			AccountId: cloudflareAccountId,
-		},
-	}
+	queueMgr = queue.NewInMemoryQueueManager()
 
 	slackMgr := &adkchatsdk.SlackChatManager{
 		SdkConfig: adkchatsdk.SlackSdkConfig{
