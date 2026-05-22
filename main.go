@@ -76,7 +76,6 @@ func app() {
 			&controllers.SlackWebhookController{
 				QueueManager: queueMgr,
 				ChatManager:  slackMgr,
-				BypassToken:  mustEnv("SLACK_WEBHOOK_BYPASS_TOKEN"),
 			},
 		},
 	}
