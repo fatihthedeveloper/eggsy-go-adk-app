@@ -108,6 +108,14 @@ func (s *SlackWebhookController) GetHandler() echo.HandlerFunc {
 			},
 		})
 
+		reactionReqBuilder := adkchatsdk.SlackReactToMessageRequestBuilder{
+			ChannelId:        envelope.Event.Channel,
+			ThreadTimestamp:  sessionId,
+			MessageTimestamp: messageId,
+			Emoji:            "tennis",
+		}
+		s.ChatManager.ReactToMessage(reactionReqBuilder.Build())
+
 		// Always return 200 OK immediately to Slack
 		return c.NoContent(http.StatusOK)
 	}
