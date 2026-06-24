@@ -43,6 +43,7 @@ func (n *NativeImplTransactionTrackerToolsBuilder) UpdateTransactionTool() (tool
 			MerchantName:    req.MerchantName,
 			Description:     req.Description,
 			Category:        req.Category,
+			TransactionDate: req.TransactionDate,
 		})
 		if err != nil {
 			return updateTransactionResult{}, err
