@@ -2,73 +2,40 @@ package main
 
 import (
 	"context"
-	commonTools "egy-go-adk-app/agents/common/tools"
-	trxTools "egy-go-adk-app/agents/transactiontracker/tools"
 	"egy-go-adk-app/applications"
 	"egy-go-adk-app/controllers"
-	"egy-go-adk-app/services/agentrunner"
 	"egy-go-adk-app/services/queue"
 	"egy-go-adk-app/utilities"
 	"log"
 	"log/slog"
-	"net/http"
-	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
-
-	adkchatsdk "github.com/fatihthedeveloper/adk-chat-sdk"
-	commoncloudflared1sdk "github.com/fatihthedeveloper/cloudflare-d1-sdk"
-	eggsyaccountsdk "github.com/fatihthedeveloper/eggsy-account-sdk"
-	eggsytransactionsdk "github.com/fatihthedeveloper/eggsy-transaction-sdk"
-	"google.golang.org/adk/agent/llmagent"
-	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/runner"
-	"google.golang.org/adk/session"
-	"google.golang.org/adk/tool"
-	"google.golang.org/genai"
 )
 
-const appName = "transactions_tracker_app"
-
-func mustEnv(key string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		log.Fatalf("required env var %s is not set", key)
-	}
-	return v
-}
-
+// This is the LOCAL-DEVELOPMENT entry point: it runs the HTTP server, an in-memory
+// queue, and a polling worker loop in a single process — the old Lightsail container
+// model. Production runs on AWS Lambda via cmd/worker (the agent) behind the Python
+// receiver Lambda (the HTTP front door). See LAMBDA_MIGRATION.md.
 func app() {
 	utilities.InitializeLog()
 
-	slog.Info("Initializing App!")
+	slog.Info("Initializing local dev app!")
 
 	// ctx is cancelled automatically when SIGINT or SIGTERM is received.
-	// stop() releases the signal resources — always defer it.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	var wg sync.WaitGroup
+	httpClient := applications.DefaultHTTPClient()
 
-	httpClient := &http.Client{
-		Timeout: 10 * time.Second, // Set a sensible timeout
+	agentRunner, err := applications.BuildAgentRunner(ctx, httpClient)
+	if err != nil {
+		log.Fatalf("failed to build agent runner: %v", err)
 	}
 
-	cloudflareAccountId := mustEnv("CLOUDFLARE_ACCOUNT_ID")
-
-	var queueMgr queue.QueueManager
-
-	queueMgr = queue.NewInMemoryQueueManager()
-
-	slackMgr := &adkchatsdk.SlackChatManager{
-		SdkConfig: adkchatsdk.SlackSdkConfig{
-			SigningSecret: mustEnv("SLACK_SIGNING_SECRET"),
-			APIToken:      mustEnv("SLACK_API_TOKEN"),
-		},
-		Client: httpClient,
-	}
+	slackMgr := applications.NewSlackManager(httpClient)
+	queueMgr := queue.NewInMemoryQueueManager()
 
 	httpServer := applications.HttpServer{
 		Controllers: []controllers.Controller{
@@ -80,132 +47,48 @@ func app() {
 		},
 	}
 
-	model, err := gemini.NewModel(ctx, "gemini-flash-latest", &genai.ClientConfig{
-		APIKey: mustEnv("GEMINI_API_KEY"),
-		// Project: "588749770102",
-	})
-	if err != nil {
-		log.Fatalf("Failed to create model: %v", err)
+	worker := &applications.QueueWorker{
+		AgentRunner: agentRunner,
+		ChatManager: slackMgr,
 	}
 
-	cloudflareConfig := &commoncloudflared1sdk.D1Config{
-		ProjectId:  cloudflareAccountId,
-		DatabaseId: mustEnv("CLOUDFLARE_D1_DATABASE_ID"),
-		APIToken:   mustEnv("CLOUDFLARE_D1_API_TOKEN"),
-	}
+	var wg sync.WaitGroup
+	wg.Add(2)
 
-	transactionSvcBuilder := eggsytransactionsdk.CloudFlareD1TransactionServiceBuilder{
-		HttpClient:       httpClient,
-		CloudFlareConfig: cloudflareConfig,
-	}
-	transactionSvc, _ := transactionSvcBuilder.Build()
-
-	accountSvcBuilder := eggsyaccountsdk.CloudFlareD1AccountServiceBuilder{
-		HttpClient:       httpClient,
-		CloudFlareConfig: cloudflareConfig,
-	}
-	accountSvc, _ := accountSvcBuilder.Build()
-
-	trxToolsBuilder := trxTools.NativeImplTransactionTrackerToolsBuilder{
-		TrxService: transactionSvc,
-		AccService: accountSvc,
-	}
-
-	commonToolsBuilder := commonTools.NativeImplCommonToolsBuilder{}
-
-	agentTools := []tool.Tool{}
-
-	type toolSet struct {
-		Tool  tool.Tool
-		Error error
-	}
-
-	for _, toolFn := range []func() (tool.Tool, error){
-		trxToolsBuilder.CreateAccountByEmailTool,
-		trxToolsBuilder.GetAccountByEmailTool,
-		trxToolsBuilder.CreateTransactionTool,
-		trxToolsBuilder.ListTransactionTool,
-		trxToolsBuilder.UpdateTransactionTool,
-		trxToolsBuilder.DeleteTransactionTool,
-		trxToolsBuilder.GetTransactionTool,
-
-		commonToolsBuilder.GetUTCISOTimestampTool,
-	} {
-		toolItem, err := toolFn()
-		if err != nil {
-			slog.Error("error building tool " + toolItem.Name())
-			return
-		}
-
-		agentTools = append(agentTools, toolItem)
-	}
-
-	transactionTrackerAgent, err := llmagent.New(llmagent.Config{
-		Name:        "transaction_tracker_agent",
-		Model:       model,
-		Description: "Records, updates, and/or fetches daily transaction(s) of requesting users",
-		Instruction: `
-			You are a helpful transaction tracker assistant that helps users record, update, fetch, and/or summarize transaction details.
-
-			If an account doesn't exist for the user's email, create an account for them before executing any of their requests.
-			If an account already exists, don't try to create an account. It means you can immediately proceed with the transaction operations.
-			Return the email under which the user has been enrolled so the user knows the identifier for his/her transactions tracking account.
-
-			Only trust the get_current_utc_iso_timestamp_tool tool for fetching the current UTC ISO timestamps.
-
-			Limit the transaction operations to the scope under the user's own email. 
-			Do not allow a user to modify other users' transactions.
-
-			Do not allow empty transaction Date input, if you cannot conclude the transaction date to be set from the user's prompt, 
-			please set it as current UTC ISO using the get_current_utc_iso_timestamp_tool tool.
-
-			After creating/updating a transaction, be sure to fetch the updated transaction record, using the get_transaction_tool or 
-			list_transaction_tool (whichever is more fitting).
-
-			When returning a transaction detail(s), be sure to return all the fields eventhough it's obvious.
-			In your responses, be fun and add emojis so your responses look helpful.
-		`,
-		Tools: agentTools,
-	})
-	if err != nil {
-		slog.Error("error building agent")
-		return
-	}
-
-	sessionSvc := session.InMemoryService()
-
-	adkRunner, e := runner.New(runner.Config{
-		AppName:           appName,
-		Agent:             transactionTrackerAgent,
-		SessionService:    sessionSvc,
-		AutoCreateSession: true,
-	})
-	if e != nil {
-		slog.Error("error build runner")
-		return
-	}
-
-	agentRunner := &agentrunner.EphemeralRunner{
-		AppName:        appName,
-		Runner:         adkRunner,
-		SessionService: sessionSvc,
-	}
-
-	queueWorker := applications.QueueWorker{
-		QueueManager: queueMgr,
-		ChatManager:  slackMgr,
-		AgentRunner:  agentRunner,
-	}
-
-	wg.Add(1)
-	go queueWorker.Run(ctx, &wg)
 	go httpServer.Run(ctx, &wg)
+	go runLocalWorkerLoop(ctx, &wg, queueMgr, worker)
 
-	slog.Info("Initialized App!")
+	slog.Info("Initialized local dev app!")
 
 	wg.Wait()
 
 	slog.Info("Exiting App!")
+}
+
+// runLocalWorkerLoop replaces the QueueWorker.Run poll loop that was removed for Lambda.
+// It exists only for local development against the in-memory queue.
+func runLocalWorkerLoop(ctx context.Context, wg *sync.WaitGroup, queueMgr queue.QueueManager, worker *applications.QueueWorker) {
+	defer wg.Done()
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("Background worker shutting down...")
+			return
+		case <-time.After(time.Second * 2):
+			cont := context.Background()
+			msgs, er := queueMgr.Poll(cont, queue.Tasks, 30000, 10)
+			if er != nil {
+				slog.ErrorContext(cont, "Failed to poll", "error", er.Error())
+				continue
+			}
+
+			for _, msg := range msgs {
+				worker.Process(cont, msg)
+				queueMgr.Ack(cont, queue.Tasks, []queue.QueueMessage{msg})
+			}
+		}
+	}
 }
 
 func main() {

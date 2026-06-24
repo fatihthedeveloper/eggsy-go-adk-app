@@ -3,6 +3,7 @@ module egy-go-adk-app
 go 1.26.3
 
 require (
+	github.com/aws/aws-lambda-go v1.54.0
 	github.com/cloudflare/cloudflare-go/v6 v6.10.0
 	github.com/fatihthedeveloper/adk-chat-sdk v1.0.1
 	github.com/fatihthedeveloper/cloudflare-d1-sdk v1.0.1

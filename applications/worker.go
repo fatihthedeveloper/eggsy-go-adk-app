@@ -5,46 +5,17 @@ import (
 	"egy-go-adk-app/services/agentrunner"
 	"egy-go-adk-app/services/queue"
 	"log/slog"
-	"sync"
-	"time"
 
 	adkchatsdk "github.com/fatihthedeveloper/adk-chat-sdk"
 	"google.golang.org/genai"
 )
 
+// QueueWorker runs a single job: react to the Slack message, run the agent, and reply.
+// It used to also own a polling loop (Run); under Lambda each message is delivered as a
+// discrete invocation, so the loop is gone and Process is called once per invocation.
 type QueueWorker struct {
-	QueueManager queue.QueueManager
-	AgentRunner  *agentrunner.EphemeralRunner
-	ChatManager  adkchatsdk.ChatManager
-}
-
-func (q *QueueWorker) Run(ctx context.Context, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	for {
-		// Sleep interruptibly: wake up either after 5s or when ctx is cancelled.
-		select {
-		case <-ctx.Done():
-			slog.Info("Background worker shutting down...")
-			return
-		case <-time.After(time.Second * 5):
-			cont := context.Background()
-			msgs, er := q.QueueManager.Poll(cont, queue.Tasks, 10, 10)
-			if er != nil {
-				slog.ErrorContext(cont, "Failed to poll", "error", er.Error())
-				return
-			}
-
-			for _, msg := range msgs {
-				slog.InfoContext(cont, "fetched msg with data:"+msg.Body["id"])
-
-				q.Process(cont, msg)
-				q.QueueManager.Ack(cont, queue.Tasks, []queue.QueueMessage{msg})
-
-				slog.InfoContext(cont, "acked msg with data:"+msg.Body["id"])
-			}
-		}
-	}
+	AgentRunner *agentrunner.EphemeralRunner
+	ChatManager adkchatsdk.ChatManager
 }
 
 func (q *QueueWorker) Process(ctx context.Context, msg queue.QueueMessage) {

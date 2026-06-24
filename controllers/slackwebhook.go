@@ -3,17 +3,19 @@ package controllers
 import (
 	"bytes"
 	"egy-go-adk-app/services/queue"
-	"encoding/json"
+	"egy-go-adk-app/services/slackmsg"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 
 	adkchatsdk "github.com/fatihthedeveloper/adk-chat-sdk"
-	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 )
 
+// SlackWebhookController is the local-dev HTTP entry point. In production the Slack
+// webhook is fronted by the (Python) receiver Lambda, which forwards the raw event to
+// the worker; see LAMBDA_MIGRATION.md. Both paths share slackmsg.BuildCommandMessage.
 type SlackWebhookController struct {
 	QueueManager queue.QueueManager
 	ChatManager  adkchatsdk.ChatManager
@@ -61,57 +63,22 @@ func (s *SlackWebhookController) GetHandler() echo.HandlerFunc {
 			return c.String(http.StatusBadRequest, "Untrusted Source!")
 		}
 
-		// 4. Process the event (e.g., push to SQS)
+		// 4. Process the event (push to the queue for the worker to pick up)
 		slog.Debug("received slack event",
 			"type", envelope.Event.Type,
 			"event_id", envelope.EventID,
 		)
 
-		messageId, sessionId := envelope.Event.TS, envelope.Event.TS
-		threadHistory := "[]"
-		if envelope.Event.ThreadTS != "" {
-			sessionId = envelope.Event.ThreadTS
+		msg := slackmsg.BuildCommandMessage(s.ChatManager, envelope)
 
-			threadHistoryRawData, _ := s.ChatManager.FetchThread(adkchatsdk.FetchThreadRequest{
-				ChannelId: envelope.Event.Channel,
-				ThreadId:  sessionId,
-			})
+		slog.InfoContext(c.Request().Context(), "prompt: "+msg.Body["command"])
 
-			jsonThreadHistory, _ := json.Marshal(threadHistoryRawData)
-			threadHistory = string(jsonThreadHistory)
-		}
-
-		type structuredCommand struct {
-			UserEmail     string
-			Prompt        string
-			ThreadHistory string
-		}
-
-		newEmail := fmt.Sprintf("%s@kresnofatihimani.slack.com", envelope.Event.User)
-
-		cmd, _ := json.Marshal(structuredCommand{
-			UserEmail:     newEmail,
-			Prompt:        envelope.Event.Text,
-			ThreadHistory: threadHistory,
-		})
-
-		slog.InfoContext(c.Request().Context(), "prompt: "+string(cmd))
-
-		s.QueueManager.Publish(c.Request().Context(), queue.Tasks, queue.QueueMessage{
-			Id: uuid.NewString(),
-			Body: map[string]string{
-				"user":      envelope.Event.User,
-				"sessionId": sessionId,
-				"command":   string(cmd),
-				"messageId": messageId,
-				"channelId": envelope.Event.Channel,
-			},
-		})
+		s.QueueManager.Publish(c.Request().Context(), queue.Tasks, msg)
 
 		reactionReqBuilder := adkchatsdk.SlackReactToMessageRequestBuilder{
-			ChannelId:        envelope.Event.Channel,
-			ThreadTimestamp:  sessionId,
-			MessageTimestamp: messageId,
+			ChannelId:        msg.Body["channelId"],
+			ThreadTimestamp:  msg.Body["sessionId"],
+			MessageTimestamp: msg.Body["messageId"],
 			Emoji:            "tennis",
 		}
 		s.ChatManager.ReactToMessage(reactionReqBuilder.Build())
