@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1.7
+#
+# Lambda container image for the Go WORKER (cmd/worker).
+# Build & deploy:
+#   docker build -f Dockerfile.lambda -t <ecr-repo>:latest .
+#   docker push <ecr-repo>:latest
+# Then point the worker Lambda (architecture x86_64) at this image.
+#
+# NOTE: the binary is built inside the Linux build stage and brought in with
+# COPY --from, which preserves the Unix execute bit. Do NOT copy a Windows-built
+# binary directly — it lands without +x and Lambda fails with
+# "fork/exec ...: permission denied / Runtime.InvalidEntrypoint".
+
+# ---- build stage ----
+FROM golang:1.26-alpine AS build
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+COPY . .
+
+# Build the worker entry point (NOT the repo root — that is the local-dev server).
+# lambda.norpc drops the unused net/rpc handler; trimpath + ldflags shrink the binary.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux \
+    go build -tags lambda.norpc -trimpath -ldflags="-s -w" -o /out/bootstrap ./cmd/worker
+
+# ---- runtime stage ----
+# AWS-provided base for custom (Go) runtimes. aws-lambda-go's lambda.Start implements
+# the Lambda Runtime API, so the binary itself is the entrypoint.
+FROM public.ecr.aws/lambda/provided:al2023
+
+COPY --from=build /out/bootstrap ${LAMBDA_TASK_ROOT}/bootstrap
+
+ENTRYPOINT ["/var/task/bootstrap"]
